@@ -28,6 +28,7 @@ import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import { DraggableItem } from "@/components/draggable-item";
+import { Spinner } from "@/components/spinner";
 import { TierRow } from "@/components/tier-row";
 import { DEFAULT_TIER_COLORS } from "@/lib/constants";
 import type { TierData, TierItem, TierListData } from "@/types/tier-list";
@@ -158,6 +159,10 @@ export function TierBoard({
   const { tiers, poolItems } = board;
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [uploadingCount, setUploadingCount] = useState(0);
+  // Latest values for async work (uploads) that resolves after later renders.
+  const latest = useRef({ title, board });
+  latest.current = { title, board };
   const dragStartBoard = useRef<Board | null>(null);
 
   const pointerSensor = useSensor(PointerSensor, {
@@ -456,6 +461,7 @@ export function TierBoard({
     }
 
     let urls: string[] = [];
+    setUploadingCount((count) => count + files.length);
     try {
       const uploadResponse = await fetch("/api/upload", {
         method: "POST",
@@ -470,6 +476,8 @@ export function TierBoard({
     } catch {
       toast.error("Upload failed. Check your connection and try again.");
       return;
+    } finally {
+      setUploadingCount((count) => count - files.length);
     }
 
     if (urls.length < files.length) {
@@ -481,14 +489,17 @@ export function TierBoard({
       return;
     }
 
-    queueSave(title, {
-      ...board,
+    // Use the board as it is now, not when the upload started, so moves made
+    // while uploading aren't overwritten.
+    const current = latest.current;
+    queueSave(current.title, {
+      ...current.board,
       poolItems: [
-        ...poolItems,
+        ...current.board.poolItems,
         ...urls.map((imageUrl, index) => ({
           id: crypto.randomUUID(),
           imageUrl,
-          order: poolItems.length + index,
+          order: current.board.poolItems.length + index,
           tierId: null,
         })),
       ],
@@ -574,6 +585,16 @@ export function TierBoard({
                   imageUrl={item.imageUrl}
                   disabled={readOnly}
                 />
+              ))}
+              {Array.from({ length: uploadingCount }, (_, index) => (
+                <output
+                  // biome-ignore lint/suspicious/noArrayIndexKey: transient placeholders
+                  key={index}
+                  className="flex h-22 w-22 animate-pulse items-center justify-center border border-ink-700 bg-ink-800 text-muted"
+                >
+                  <Spinner className="h-5 w-5" />
+                  <span className="sr-only">Uploading image</span>
+                </output>
               ))}
               {!readOnly && (
                 <label className="flex h-22 w-22 cursor-pointer items-center justify-center border border-dashed border-accent-dim bg-accent/10 text-accent transition hover:border-accent hover:bg-accent/20">

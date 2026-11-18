@@ -4,6 +4,7 @@ import { ChevronDown, LogOut } from "lucide-react";
 import Image from "next/image";
 import { signOut } from "next-auth/react";
 import { useEffect, useRef, useState } from "react";
+import { Spinner } from "@/components/spinner";
 
 type UserMenuProps = {
   fullName: string;
@@ -13,6 +14,7 @@ type UserMenuProps = {
 
 export function UserMenu({ fullName, email, imageUrl }: UserMenuProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -99,11 +101,16 @@ export function UserMenu({ fullName, email, imageUrl }: UserMenuProps) {
         <div className="my-3 h-px bg-ink-700" />
         <button
           type="button"
-          onClick={() => signOut({ callbackUrl: "/" })}
-          className="flex w-full cursor-pointer items-center gap-2 px-2 py-2 text-left text-sm font-semibold uppercase tracking-[0.06em] text-accent transition hover:bg-accent hover:text-accent-ink"
+          onClick={() => {
+            setIsSigningOut(true);
+            void signOut({ callbackUrl: "/" });
+          }}
+          disabled={isSigningOut}
+          aria-busy={isSigningOut}
+          className="flex w-full cursor-pointer items-center gap-2 px-2 py-2 text-left text-sm font-semibold uppercase tracking-[0.06em] text-accent transition hover:bg-accent hover:text-accent-ink disabled:cursor-wait disabled:opacity-70"
         >
-          <LogOut className="h-4 w-4" />
-          Logout
+          {isSigningOut ? <Spinner /> : <LogOut className="h-4 w-4" />}
+          {isSigningOut ? "Logging out..." : "Logout"}
         </button>
       </div>
     </div>

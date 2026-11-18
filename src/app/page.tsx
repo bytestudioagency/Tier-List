@@ -2,6 +2,8 @@ import { Share2 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { auth, signIn } from "@/auth";
+import { PendingSubmitButton } from "@/components/pending-submit-button";
+import { LinkPendingIcon } from "@/components/spinner";
 
 export default async function Home() {
   const session = await auth();
@@ -70,12 +72,13 @@ export default async function Home() {
               {session?.user ? (
                 <Link
                   href="/dashboard"
-                  className="cursor-pointer bg-accent px-7 py-3.5 text-sm font-bold uppercase tracking-[0.14em] text-accent-ink transition hover:-translate-y-0.5 hover:bg-accent-strong"
+                  className="inline-flex cursor-pointer items-center gap-2 bg-accent px-7 py-3.5 text-sm font-bold uppercase tracking-[0.14em] text-accent-ink transition hover:-translate-y-0.5 hover:bg-accent-strong"
                   style={{
                     clipPath:
                       "polygon(0 0, 100% 0, 100% 70%, 92% 100%, 0 100%)",
                   }}
                 >
+                  <LinkPendingIcon icon={null} />
                   Open Dashboard
                 </Link>
               ) : (
@@ -85,8 +88,8 @@ export default async function Home() {
                     await signIn("google", { redirectTo: "/dashboard" });
                   }}
                 >
-                  <button
-                    type="submit"
+                  <PendingSubmitButton
+                    pendingLabel="Redirecting to Google..."
                     className="cursor-pointer bg-accent px-7 py-3.5 text-sm font-bold uppercase tracking-[0.14em] text-accent-ink transition hover:-translate-y-0.5 hover:bg-accent-strong"
                     style={{
                       clipPath:
@@ -94,7 +97,7 @@ export default async function Home() {
                     }}
                   >
                     Sign In with Google
-                  </button>
+                  </PendingSubmitButton>
                 </form>
               )}
             </div>
