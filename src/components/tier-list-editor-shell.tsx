@@ -15,6 +15,9 @@ export function TierListEditorShell({ initial }: Props) {
   const [isSaving, setIsSaving] = useState(false);
   const [manualSaving, setManualSaving] = useState(false);
   const [viewOnly, setViewOnly] = useState(false);
+  // Latest board state, so View Only shows unsaved edits and toggling back
+  // doesn't remount the editor from stale server data.
+  const [current, setCurrent] = useState<TierListData>(initial);
   const [manualSaveHandler, setManualSaveHandler] = useState<
     null | (() => Promise<void>)
   >(null);
@@ -64,17 +67,18 @@ export function TierListEditorShell({ initial }: Props) {
         </div>
       </div>
 
-      {viewOnly ? (
-        <TierListView data={initial} />
-      ) : (
-        <div className="border border-ink-700 bg-ink-950 p-3 sm:p-4">
-          <TierBoard
-            initial={initial}
-            onSavingChange={setIsSaving}
-            onManualSaveReady={(save) => setManualSaveHandler(() => save)}
-          />
-        </div>
-      )}
+      {viewOnly && <TierListView data={current} />}
+      <div
+        className="border border-ink-700 bg-ink-950 p-3 sm:p-4"
+        hidden={viewOnly}
+      >
+        <TierBoard
+          initial={initial}
+          onSavingChange={setIsSaving}
+          onManualSaveReady={(save) => setManualSaveHandler(() => save)}
+          onChange={setCurrent}
+        />
+      </div>
     </>
   );
 }

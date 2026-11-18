@@ -1,10 +1,7 @@
 "use client";
 
 import { useDroppable } from "@dnd-kit/core";
-import {
-  horizontalListSortingStrategy,
-  SortableContext,
-} from "@dnd-kit/sortable";
+import { rectSortingStrategy, SortableContext } from "@dnd-kit/sortable";
 import { Palette, Trash2 } from "lucide-react";
 import { DraggableItem } from "@/components/draggable-item";
 import type { TierData } from "@/types/tier-list";
@@ -68,12 +65,12 @@ export function TierRow({
       </div>
       <SortableContext
         items={tier.items.map((item) => item.id)}
-        strategy={horizontalListSortingStrategy}
+        strategy={rectSortingStrategy}
       >
         <div
           id={tier.id}
           ref={setNodeRef}
-          className={`min-h-22 transition ${isOver ? "bg-ink-800" : "bg-transparent"}`}
+          className={`min-h-22 transition-colors ${isOver ? "bg-ink-800" : "bg-transparent"}`}
         >
           <div className="flex min-h-22 flex-wrap gap-0">
             {tier.items.map((item) => (
@@ -81,6 +78,7 @@ export function TierRow({
                 key={item.id}
                 id={item.id}
                 imageUrl={item.imageUrl}
+                disabled={readOnly}
               />
             ))}
           </div>

@@ -8,9 +8,10 @@ import Image from "next/image";
 type Props = {
   id: string;
   imageUrl: string;
+  disabled?: boolean;
 };
 
-export function DraggableItem({ id, imageUrl }: Props) {
+export function DraggableItem({ id, imageUrl, disabled = false }: Props) {
   const {
     attributes,
     listeners,
@@ -20,6 +21,7 @@ export function DraggableItem({ id, imageUrl }: Props) {
     isDragging,
   } = useSortable({
     id,
+    disabled,
   });
 
   return (
@@ -27,14 +29,15 @@ export function DraggableItem({ id, imageUrl }: Props) {
       ref={setNodeRef}
       type="button"
       style={{
-        transform: CSS.Transform.toString(transform),
+        transform: CSS.Translate.toString(transform),
         transition,
       }}
       className={clsx(
-        "relative h-22 w-22 overflow-hidden border border-ink-700 bg-ink-900 transition",
-        isDragging
-          ? "z-50 scale-105 border-accent shadow-lg shadow-black/60"
-          : "hover:border-ink-500",
+        "relative h-22 w-22 overflow-hidden border bg-ink-900 transition-colors",
+        // The DragOverlay follows the pointer; the original stays as a dim placeholder.
+        isDragging ? "border-accent opacity-30" : "border-ink-700",
+        !disabled &&
+          "cursor-grab touch-none select-none hover:border-ink-500 active:cursor-grabbing",
       )}
       {...attributes}
       {...listeners}
@@ -43,8 +46,9 @@ export function DraggableItem({ id, imageUrl }: Props) {
         src={imageUrl}
         alt="Tier item"
         fill
-        className="object-cover"
-        sizes="80px"
+        draggable={false}
+        className="pointer-events-none object-cover"
+        sizes="88px"
       />
     </button>
   );

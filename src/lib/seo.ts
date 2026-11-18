@@ -1,7 +1,7 @@
 export const SITE_NAME = "Tier List";
 
 export const SITE_URL = (
-  process.env.NEXT_PUBLIC_SITE_URL ?? "https://tierlist.heysohail.xyz"
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://tierlist.bytestudio.website"
 ).replace(/\/$/, "");
 
 export const SITE_TAGLINE = "Drag. Rank. Share.";

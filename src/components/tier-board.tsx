@@ -1,25 +1,32 @@
 "use client";
 
 import {
-  closestCorners,
+  type CollisionDetection,
+  closestCenter,
   DndContext,
   type DragEndEvent,
+  type DragOverEvent,
   DragOverlay,
   type DragStartEvent,
+  KeyboardSensor,
   PointerSensor,
+  pointerWithin,
+  TouchSensor,
   useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
 import {
   arrayMove,
-  horizontalListSortingStrategy,
+  rectSortingStrategy,
   SortableContext,
+  sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 import debounce from "lodash.debounce";
 import { Plus } from "lucide-react";
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Toaster, toast } from "react-hot-toast";
 import { DraggableItem } from "@/components/draggable-item";
 import { TierRow } from "@/components/tier-row";
 import { DEFAULT_TIER_COLORS } from "@/lib/constants";
@@ -30,7 +37,15 @@ type Props = {
   readOnly?: boolean;
   onSavingChange?: (isSaving: boolean) => void;
   onManualSaveReady?: (save: () => Promise<void>) => void;
+  onChange?: (data: TierListData) => void;
 };
+
+type Board = {
+  tiers: TierData[];
+  poolItems: TierItem[];
+};
+
+const POOL_ID = "pool";
 
 const FALLBACK_TIER_COLOR = {
   bgColor: "#3f3f46",
@@ -63,7 +78,7 @@ function withTierColor(tier: TierData): TierData {
   };
 }
 
-function normalize(tiers: TierData[], poolItems: TierItem[]) {
+function normalize({ tiers, poolItems }: Board): Board {
   return {
     tiers: tiers.map((tier, tierIndex) => ({
       ...tier,
@@ -82,26 +97,103 @@ function normalize(tiers: TierData[], poolItems: TierItem[]) {
   };
 }
 
+/** Which container ("pool" or a tier id) holds this id. Container ids map to themselves. */
+function findContainer(board: Board, id: string): string | null {
+  if (id === POOL_ID) {
+    return POOL_ID;
+  }
+  if (board.tiers.some((tier) => tier.id === id)) {
+    return id;
+  }
+  if (board.poolItems.some((item) => item.id === id)) {
+    return POOL_ID;
+  }
+  return (
+    board.tiers.find((tier) => tier.items.some((item) => item.id === id))?.id ??
+    null
+  );
+}
+
+function getItems(board: Board, containerId: string): TierItem[] {
+  if (containerId === POOL_ID) {
+    return board.poolItems;
+  }
+  return board.tiers.find((tier) => tier.id === containerId)?.items ?? [];
+}
+
+function setItems(board: Board, containerId: string, items: TierItem[]): Board {
+  if (containerId === POOL_ID) {
+    return { ...board, poolItems: items };
+  }
+  return {
+    ...board,
+    tiers: board.tiers.map((tier) =>
+      tier.id === containerId ? { ...tier, items } : tier,
+    ),
+  };
+}
+
+/** Cheap fingerprint of item placement, used to skip no-op saves. */
+function layoutSignature(board: Board) {
+  const tiers = board.tiers
+    .map((tier) => `${tier.id}:${tier.items.map((item) => item.id).join(",")}`)
+    .join("|");
+  return `${tiers}|pool:${board.poolItems.map((item) => item.id).join(",")}`;
+}
+
 export function TierBoard({
   initial,
   readOnly = false,
   onSavingChange,
   onManualSaveReady,
+  onChange,
 }: Props) {
   const [title, setTitle] = useState(initial.title);
-  const [tiers, setTiers] = useState<TierData[]>(() =>
-    initial.tiers.map(withTierColor),
-  );
-  const [poolItems, setPoolItems] = useState<TierItem[]>(initial.poolItems);
+  const [board, setBoard] = useState<Board>(() => ({
+    tiers: [...initial.tiers]
+      .sort((a, b) => a.order - b.order)
+      .map(withTierColor),
+    poolItems: [...initial.poolItems].sort((a, b) => a.order - b.order),
+  }));
+  const { tiers, poolItems } = board;
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const dragStartBoard = useRef<Board | null>(null);
+
   const pointerSensor = useSensor(PointerSensor, {
     activationConstraint: { distance: 8 },
   });
-  const sensors = useSensors(...(readOnly ? [] : [pointerSensor]));
-  const { setNodeRef: setPoolRef, isOver: isPoolOver } = useDroppable({
-    id: "pool",
+  const touchSensor = useSensor(TouchSensor, {
+    activationConstraint: { delay: 180, tolerance: 6 },
   });
+  const keyboardSensor = useSensor(KeyboardSensor, {
+    coordinateGetter: sortableKeyboardCoordinates,
+  });
+  const sensors = useSensors(
+    ...(readOnly ? [] : [pointerSensor, touchSensor, keyboardSensor]),
+  );
+  const { setNodeRef: setPoolRef, isOver: isPoolOver } = useDroppable({
+    id: POOL_ID,
+  });
+
+  const containerIds = useMemo(
+    () => new Set([POOL_ID, ...tiers.map((tier) => tier.id)]),
+    [tiers],
+  );
+
+  // Prefer the item directly under the pointer; fall back to the container
+  // under the pointer, then to the nearest droppable (keyboard / edge cases).
+  const collisionDetection: CollisionDetection = useCallback(
+    (args) => {
+      const hits = pointerWithin(args);
+      if (hits.length > 0) {
+        const itemHit = hits.find((hit) => !containerIds.has(String(hit.id)));
+        return [itemHit ?? hits[0]];
+      }
+      return closestCenter(args);
+    },
+    [containerIds],
+  );
 
   const allItems = useMemo(
     () => [...poolItems, ...tiers.flatMap((tier) => tier.items)],
@@ -112,236 +204,205 @@ export function TierBoard({
     onSavingChange?.(isSaving);
   }, [isSaving, onSavingChange]);
 
+  useEffect(() => {
+    onChange?.({ ...initial, title, ...normalize(board) });
+  }, [board, initial, onChange, title]);
+
   const saveTierList = useCallback(
-    async (
-      nextTitle: string,
-      nextTiers: TierData[],
-      nextPoolItems: TierItem[],
-    ) => {
+    async (nextTitle: string, nextBoard: Board) => {
       if (readOnly) {
         return;
       }
 
-      const payload = normalize(nextTiers, nextPoolItems);
+      const payload = normalize(nextBoard);
       setIsSaving(true);
-      await fetch(`/api/tier-lists/${initial.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: nextTitle,
-          tiers: payload.tiers.map((tier) => ({
-            id: tier.id,
-            name: tier.name,
-            bgColor: tier.bgColor ?? FALLBACK_TIER_COLOR.bgColor,
-            textColor: tier.textColor ?? FALLBACK_TIER_COLOR.textColor,
-            order: tier.order,
-          })),
-          items: [
-            ...payload.poolItems,
-            ...payload.tiers.flatMap((tier) => tier.items),
-          ].map((item) => ({
-            id: item.id,
-            imageUrl: item.imageUrl,
-            tierId: item.tierId,
-            order: item.order,
-          })),
-        }),
-      });
-      setIsSaving(false);
+      try {
+        const response = await fetch(`/api/tier-lists/${initial.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: nextTitle,
+            tiers: payload.tiers.map((tier) => ({
+              id: tier.id,
+              name: tier.name,
+              bgColor: tier.bgColor ?? FALLBACK_TIER_COLOR.bgColor,
+              textColor: tier.textColor ?? FALLBACK_TIER_COLOR.textColor,
+              order: tier.order,
+            })),
+            items: [
+              ...payload.poolItems,
+              ...payload.tiers.flatMap((tier) => tier.items),
+            ].map((item) => ({
+              id: item.id,
+              imageUrl: item.imageUrl,
+              tierId: item.tierId,
+              order: item.order,
+            })),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Save failed with status ${response.status}`);
+        }
+      } catch {
+        toast.error("Couldn't save your changes. Please try again.", {
+          id: "save-error",
+        });
+      } finally {
+        setIsSaving(false);
+      }
     },
     [initial.id, readOnly],
   );
 
   const debouncedSave = useMemo(
     () =>
-      debounce(
-        (
-          nextTitle: string,
-          nextTiers: TierData[],
-          nextPoolItems: TierItem[],
-        ) => {
-          void saveTierList(nextTitle, nextTiers, nextPoolItems);
-        },
-        550,
-      ),
+      debounce((nextTitle: string, nextBoard: Board) => {
+        void saveTierList(nextTitle, nextBoard);
+      }, 550),
     [saveTierList],
   );
+
+  useEffect(() => () => debouncedSave.flush(), [debouncedSave]);
 
   const manualSave = useCallback(async () => {
     if (readOnly) {
       return;
     }
     debouncedSave.cancel();
-    await saveTierList(title, tiers, poolItems);
-  }, [debouncedSave, poolItems, readOnly, saveTierList, tiers, title]);
+    await saveTierList(title, board);
+  }, [board, debouncedSave, readOnly, saveTierList, title]);
 
   useEffect(() => {
     onManualSaveReady?.(manualSave);
   }, [manualSave, onManualSaveReady]);
 
-  const queueSave = (
-    nextTitle: string,
-    nextTiers: TierData[],
-    nextPoolItems: TierItem[],
-  ) => {
+  const queueSave = (nextTitle: string, nextBoard: Board) => {
+    const normalized = normalize(nextBoard);
     setTitle(nextTitle);
-    setTiers(nextTiers);
-    setPoolItems(nextPoolItems);
-    debouncedSave(nextTitle, nextTiers, nextPoolItems);
-  };
-
-  const findContainer = (itemId: string) => {
-    if (poolItems.some((item) => item.id === itemId)) {
-      return "pool";
-    }
-    const tier = tiers.find((candidate) =>
-      candidate.items.some((item) => item.id === itemId),
-    );
-    return tier?.id ?? null;
-  };
-
-  const getItemsForContainer = (containerId: string) => {
-    if (containerId === "pool") {
-      return poolItems;
-    }
-    return tiers.find((tier) => tier.id === containerId)?.items ?? [];
+    setBoard(normalized);
+    debouncedSave(nextTitle, normalized);
   };
 
   const handleDragStart = (event: DragStartEvent) => {
     if (readOnly) {
       return;
     }
+    dragStartBoard.current = board;
     setActiveId(String(event.active.id));
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    if (readOnly) {
-      setActiveId(null);
+  // Move the item into another container while hovering, so the target row
+  // makes room for it live instead of only on drop.
+  const handleDragOver = ({ active, over }: DragOverEvent) => {
+    if (!over || readOnly) {
       return;
     }
-    const active = String(event.active.id);
-    const over = event.over ? String(event.over.id) : null;
-    setActiveId(null);
-    if (!over) {
-      return;
-    }
+    const activeKey = String(active.id);
+    const overKey = String(over.id);
 
-    const sourceContainer = findContainer(active);
-    const targetContainer =
-      over === "pool" || tiers.some((tier) => tier.id === over)
-        ? over
-        : findContainer(over);
-
-    if (!sourceContainer || !targetContainer) {
-      return;
-    }
-
-    const sourceItems = [...getItemsForContainer(sourceContainer)];
-    const targetItems =
-      sourceContainer === targetContainer
-        ? sourceItems
-        : [...getItemsForContainer(targetContainer)];
-
-    const sourceIndex = sourceItems.findIndex((item) => item.id === active);
-    if (sourceIndex < 0) {
-      return;
-    }
-
-    if (sourceContainer === targetContainer) {
-      const targetIndex = targetItems.findIndex((item) => item.id === over);
-      const moved = arrayMove(
-        sourceItems,
-        sourceIndex,
-        targetIndex < 0 ? sourceItems.length - 1 : targetIndex,
-      );
-      if (sourceContainer === "pool") {
-        queueSave(
-          title,
-          tiers,
-          moved.map((item, index) => ({ ...item, order: index, tierId: null })),
-        );
-      } else {
-        const nextTiers = tiers.map((tier) =>
-          tier.id === sourceContainer
-            ? {
-                ...tier,
-                items: moved.map((item, index) => ({
-                  ...item,
-                  order: index,
-                  tierId: sourceContainer,
-                })),
-              }
-            : tier,
-        );
-        queueSave(title, nextTiers, poolItems);
+    setBoard((prev) => {
+      const from = findContainer(prev, activeKey);
+      const to = findContainer(prev, overKey);
+      if (!from || !to || from === to) {
+        return prev;
       }
-      return;
-    }
 
-    const [movedItem] = sourceItems.splice(sourceIndex, 1);
-    const targetIndex = targetItems.findIndex((item) => item.id === over);
-    targetItems.splice(
-      targetIndex < 0 ? targetItems.length : targetIndex,
-      0,
-      movedItem,
-    );
-
-    const sourceNormalized =
-      sourceContainer === "pool"
-        ? sourceItems.map((item, index) => ({
-            ...item,
-            order: index,
-            tierId: null,
-          }))
-        : sourceItems.map((item, index) => ({
-            ...item,
-            order: index,
-            tierId: sourceContainer,
-          }));
-    const targetNormalized =
-      targetContainer === "pool"
-        ? targetItems.map((item, index) => ({
-            ...item,
-            order: index,
-            tierId: null,
-          }))
-        : targetItems.map((item, index) => ({
-            ...item,
-            order: index,
-            tierId: targetContainer,
-          }));
-
-    const nextTiers = tiers.map((tier) => {
-      if (tier.id === sourceContainer) {
-        return { ...tier, items: sourceNormalized };
+      const fromItems = getItems(prev, from);
+      const toItems = getItems(prev, to);
+      const fromIndex = fromItems.findIndex((item) => item.id === activeKey);
+      if (fromIndex < 0) {
+        return prev;
       }
-      if (tier.id === targetContainer) {
-        return { ...tier, items: targetNormalized };
+
+      let insertAt = toItems.length;
+      if (!containerIds.has(overKey)) {
+        const overIndex = toItems.findIndex((item) => item.id === overKey);
+        if (overIndex >= 0) {
+          const translated = active.rect.current.translated;
+          const pastMiddle =
+            translated !== null &&
+            translated.left + translated.width / 2 >
+              over.rect.left + over.rect.width / 2;
+          insertAt = overIndex + (pastMiddle ? 1 : 0);
+        }
       }
-      return tier;
+
+      const moved = fromItems[fromIndex];
+      const nextFrom = fromItems.filter((item) => item.id !== activeKey);
+      const nextTo = [
+        ...toItems.slice(0, insertAt),
+        moved,
+        ...toItems.slice(insertAt),
+      ];
+      return setItems(setItems(prev, from, nextFrom), to, nextTo);
     });
-    const nextPool =
-      sourceContainer === "pool"
-        ? sourceNormalized
-        : targetContainer === "pool"
-          ? targetNormalized
-          : poolItems;
-    queueSave(title, nextTiers, nextPool);
+  };
+
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    const startBoard = dragStartBoard.current;
+    dragStartBoard.current = null;
+    setActiveId(null);
+    if (readOnly || !startBoard) {
+      return;
+    }
+
+    // Dropped outside every container: undo any live cross-row moves.
+    if (!over) {
+      setBoard(startBoard);
+      return;
+    }
+
+    const activeKey = String(active.id);
+    const overKey = String(over.id);
+    let nextBoard = board;
+
+    // Same-container reorder (cross-container moves already happened in dragOver).
+    const container = findContainer(board, activeKey);
+    if (container && container === findContainer(board, overKey)) {
+      const items = getItems(board, container);
+      const fromIndex = items.findIndex((item) => item.id === activeKey);
+      const toIndex = containerIds.has(overKey)
+        ? items.length - 1
+        : items.findIndex((item) => item.id === overKey);
+      if (fromIndex >= 0 && toIndex >= 0 && fromIndex !== toIndex) {
+        nextBoard = setItems(
+          board,
+          container,
+          arrayMove(items, fromIndex, toIndex),
+        );
+      }
+    }
+
+    if (layoutSignature(nextBoard) === layoutSignature(startBoard)) {
+      setBoard(startBoard);
+      return;
+    }
+    queueSave(title, nextBoard);
+  };
+
+  const handleDragCancel = () => {
+    if (dragStartBoard.current) {
+      setBoard(dragStartBoard.current);
+    }
+    dragStartBoard.current = null;
+    setActiveId(null);
   };
 
   const addTier = () => {
-    const nextTiers = [
-      ...tiers,
-      {
-        id: crypto.randomUUID(),
-        name: "New",
-        order: tiers.length,
-        bgColor: FALLBACK_TIER_COLOR.bgColor,
-        textColor: FALLBACK_TIER_COLOR.textColor,
-        items: [],
-      },
-    ];
-    queueSave(title, nextTiers, poolItems);
+    queueSave(title, {
+      ...board,
+      tiers: [
+        ...tiers,
+        {
+          id: crypto.randomUUID(),
+          name: "New",
+          order: tiers.length,
+          bgColor: FALLBACK_TIER_COLOR.bgColor,
+          textColor: FALLBACK_TIER_COLOR.textColor,
+          items: [],
+        },
+      ],
+    });
   };
 
   const removeTier = (tierId: string) => {
@@ -349,77 +410,109 @@ export function TierBoard({
     if (!removedTier) {
       return;
     }
-    const nextTiers = tiers.filter((tier) => tier.id !== tierId);
-    const nextPool = [
-      ...poolItems,
-      ...removedTier.items.map((item) => ({ ...item, tierId: null })),
-    ];
-    queueSave(title, nextTiers, nextPool);
+    queueSave(title, {
+      tiers: tiers.filter((tier) => tier.id !== tierId),
+      poolItems: [...poolItems, ...removedTier.items],
+    });
   };
 
   const renameTier = (tierId: string, name: string) => {
-    const nextTiers = tiers.map((tier) =>
-      tier.id === tierId ? { ...tier, name } : tier,
-    );
-    queueSave(title, nextTiers, poolItems);
+    queueSave(title, {
+      ...board,
+      tiers: tiers.map((tier) =>
+        tier.id === tierId ? { ...tier, name } : tier,
+      ),
+    });
   };
 
   const changeTierColor = (tierId: string, bgColor: string) => {
     const normalizedBgColor = normalizeHexColor(bgColor);
-    const nextTiers = tiers.map((tier) =>
-      tier.id === tierId
-        ? {
-            ...tier,
-            bgColor: normalizedBgColor,
-            textColor: getContrastTextColor(normalizedBgColor),
-          }
-        : tier,
-    );
-    queueSave(title, nextTiers, poolItems);
+    queueSave(title, {
+      ...board,
+      tiers: tiers.map((tier) =>
+        tier.id === tierId
+          ? {
+              ...tier,
+              bgColor: normalizedBgColor,
+              textColor: getContrastTextColor(normalizedBgColor),
+            }
+          : tier,
+      ),
+    });
   };
 
   const onTitleBlur = () => {
-    queueSave(title, tiers, poolItems);
+    queueSave(title, board);
   };
 
-  const uploadImages = async (files: FileList | null) => {
-    if (!files || files.length === 0 || readOnly) {
+  const uploadImages = async (files: File[]) => {
+    if (files.length === 0 || readOnly) {
       return;
     }
 
     const form = new FormData();
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       form.append("file", file);
     }
 
-    const uploadResponse = await fetch("/api/upload", {
-      method: "POST",
-      body: form,
+    let urls: string[] = [];
+    try {
+      const uploadResponse = await fetch("/api/upload", {
+        method: "POST",
+        body: form,
+      });
+      const body = await uploadResponse.json().catch(() => ({}));
+      if (!uploadResponse.ok) {
+        toast.error(body.error ?? "Upload failed. Please try again.");
+        return;
+      }
+      urls = (body.urls ?? []) as string[];
+    } catch {
+      toast.error("Upload failed. Check your connection and try again.");
+      return;
+    }
+
+    if (urls.length < files.length) {
+      toast.error(
+        `${files.length - urls.length} of ${files.length} images failed to upload.`,
+      );
+    }
+    if (urls.length === 0) {
+      return;
+    }
+
+    queueSave(title, {
+      ...board,
+      poolItems: [
+        ...poolItems,
+        ...urls.map((imageUrl, index) => ({
+          id: crypto.randomUUID(),
+          imageUrl,
+          order: poolItems.length + index,
+          tierId: null,
+        })),
+      ],
     });
-    if (!uploadResponse.ok) {
-      return;
-    }
-    const { urls } = await uploadResponse.json();
-
-    const valid = (urls ?? []) as string[];
-    if (valid.length === 0) {
-      return;
-    }
-
-    const nextPool = [
-      ...poolItems,
-      ...valid.map((imageUrl, index) => ({
-        id: crypto.randomUUID(),
-        imageUrl,
-        order: poolItems.length + index,
-        tierId: null,
-      })),
-    ];
-    queueSave(title, tiers, nextPool);
   };
+
+  const activeItem = activeId
+    ? allItems.find((item) => item.id === activeId)
+    : undefined;
 
   return (
     <div className="space-y-4">
+      <Toaster
+        position="top-center"
+        toastOptions={{
+          style: {
+            background: "var(--ink-800)",
+            color: "var(--foreground)",
+            border: "1px solid var(--ink-600)",
+            borderRadius: 0,
+            fontWeight: 600,
+          },
+        }}
+      />
       <div className="flex flex-wrap items-center gap-3">
         <input
           disabled={readOnly}
@@ -441,24 +534,24 @@ export function TierBoard({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={collisionDetection}
         onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
+        onDragCancel={handleDragCancel}
       >
         <div className="space-y-3">
-          {tiers
-            .sort((a, b) => a.order - b.order)
-            .map((tier) => (
-              <TierRow
-                key={tier.id}
-                tier={tier}
-                onTierNameChange={renameTier}
-                onTierColorChange={changeTierColor}
-                onRemoveTier={removeTier}
-                removable={!readOnly && tiers.length > 1}
-                readOnly={readOnly}
-              />
-            ))}
+          {tiers.map((tier) => (
+            <TierRow
+              key={tier.id}
+              tier={tier}
+              onTierNameChange={renameTier}
+              onTierColorChange={changeTierColor}
+              onRemoveTier={removeTier}
+              removable={!readOnly && tiers.length > 1}
+              readOnly={readOnly}
+            />
+          ))}
         </div>
 
         <div className="mt-6 border border-ink-700 bg-ink-900 p-3">
@@ -467,29 +560,35 @@ export function TierBoard({
           </p>
           <SortableContext
             items={poolItems.map((item) => item.id)}
-            strategy={horizontalListSortingStrategy}
+            strategy={rectSortingStrategy}
           >
             <div
-              id="pool"
+              id={POOL_ID}
               ref={setPoolRef}
-              className={`flex min-h-24 flex-wrap gap-2 p-1 transition ${isPoolOver ? "bg-ink-800" : ""}`}
+              className={`flex min-h-24 flex-wrap gap-2 p-1 transition-colors ${isPoolOver ? "bg-ink-800" : ""}`}
             >
               {poolItems.map((item) => (
                 <DraggableItem
                   key={item.id}
                   id={item.id}
                   imageUrl={item.imageUrl}
+                  disabled={readOnly}
                 />
               ))}
               {!readOnly && (
-                <label className="flex h-20 w-20 cursor-pointer items-center justify-center border border-dashed border-accent-dim bg-accent/10 text-accent transition hover:border-accent hover:bg-accent/20">
+                <label className="flex h-22 w-22 cursor-pointer items-center justify-center border border-dashed border-accent-dim bg-accent/10 text-accent transition hover:border-accent hover:bg-accent/20">
                   <Plus className="h-6 w-6" />
                   <span className="sr-only">Upload images</span>
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                     multiple
-                    onChange={(event) => uploadImages(event.target.files)}
+                    onChange={(event) => {
+                      // Copy before clearing so the same file can be picked again.
+                      const picked = Array.from(event.target.files ?? []);
+                      event.target.value = "";
+                      void uploadImages(picked);
+                    }}
                     className="hidden"
                   />
                 </label>
@@ -499,16 +598,14 @@ export function TierBoard({
         </div>
 
         <DragOverlay>
-          {activeId ? (
-            <div className="relative h-20 w-20 overflow-hidden border border-accent bg-ink-900 opacity-90">
+          {activeItem ? (
+            <div className="relative h-22 w-22 cursor-grabbing overflow-hidden border border-accent bg-ink-900 shadow-lg shadow-black/60">
               <Image
-                src={
-                  allItems.find((item) => item.id === activeId)?.imageUrl ?? ""
-                }
+                src={activeItem.imageUrl}
                 alt="Dragging item"
                 fill
                 className="object-cover"
-                sizes="80px"
+                sizes="88px"
               />
             </div>
           ) : null}
